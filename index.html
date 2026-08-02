@@ -94,6 +94,16 @@
     resize:vertical;
   }
   .dim{color:var(--sub); font-size:12px; text-align:center; margin-top:8px}
+  .crop-wrap{display:flex; justify-content:center; background:#050505; border-radius:12px; padding:10px; border:1px solid var(--line)}
+  #cropCanvas{touch-action:none; cursor:grab; border-radius:4px; max-width:100%}
+  #cropCanvas.grabbing{cursor:grabbing}
+  .crop-hint{font-size:11.5px; color:var(--sub); text-align:center; margin-top:8px}
+  .zoom-row{display:flex; align-items:center; gap:10px; margin-top:12px}
+  .zoom-row input{flex:1}
+  .btn-mini{
+    background:var(--panel2); border:1px solid var(--line); color:var(--text);
+    padding:8px 12px; border-radius:9px; font-size:12.5px; cursor:pointer; white-space:nowrap;
+  }
 </style>
 </head>
 <body>
@@ -135,11 +145,24 @@
   <div class="row">
     <label class="field">Cách khớp ảnh
       <select id="fitMode">
-        <option value="cover">Cắt vừa khung (cover)</option>
+        <option value="cover">Cắt vừa khung (chọn vị trí cắt)</option>
         <option value="contain">Giữ nguyên toàn ảnh (contain)</option>
         <option value="stretch">Kéo giãn (stretch)</option>
       </select>
     </label>
+  </div>
+</div>
+
+<div class="card" id="cropCard" style="display:none">
+  <h2>Vị trí cắt ảnh</h2>
+  <div class="crop-wrap">
+    <canvas id="cropCanvas"></canvas>
+  </div>
+  <div class="crop-hint">Kéo khung sáng để chọn vùng cắt · dùng thanh trượt để phóng to/thu nhỏ</div>
+  <div class="zoom-row">
+    <span style="font-size:12.5px; color:var(--sub)">🔍</span>
+    <input type="range" id="cropZoomSlider" min="1" max="4" step="0.05" value="1">
+    <button class="btn-mini" id="cropResetBtn">Đặt lại</button>
   </div>
 </div>
 
@@ -230,6 +253,110 @@
   let invert = false;
   let rotate180 = false;
 
+  const cropCard = document.getElementById('cropCard');
+  const cropCanvas = document.getElementById('cropCanvas');
+  const cropZoomSlider = document.getElementById('cropZoomSlider');
+  const cropResetBtn = document.getElementById('cropResetBtn');
+  const cropCtx = cropCanvas.getContext('2d');
+  let cropZoom = 1;
+  let cropPosX = 0.5, cropPosY = 0.5;
+  let cropScale = 1;
+  let dragging = false, dragStartPX=0, dragStartPY=0, dragStartRectX=0, dragStartRectY=0;
+
+  function getBaseRect(){
+    const [W,H] = getTargetDims();
+    const targetAspect = W/H;
+    const iw = img.width, ih = img.height;
+    const imgAspect = iw/ih;
+    let baseW, baseH;
+    if(imgAspect > targetAspect){ baseH = ih; baseW = ih*targetAspect; }
+    else { baseW = iw; baseH = iw/targetAspect; }
+    return {baseW, baseH};
+  }
+
+  function getCropRect(){
+    const {baseW, baseH} = getBaseRect();
+    const iw = img.width, ih = img.height;
+    const w = Math.min(iw, baseW/cropZoom);
+    const h = Math.min(ih, baseH/cropZoom);
+    const maxX = Math.max(0, iw-w), maxY = Math.max(0, ih-h);
+    const x = maxX*cropPosX, y = maxY*cropPosY;
+    return {x,y,w,h,maxX,maxY};
+  }
+
+  function drawCropUI(){
+    if(!img) return;
+    const maxW=320, maxH=320;
+    const iw=img.width, ih=img.height;
+    cropScale = Math.min(maxW/iw, maxH/ih);
+    cropCanvas.width = Math.round(iw*cropScale);
+    cropCanvas.height = Math.round(ih*cropScale);
+
+    cropCtx.drawImage(img,0,0,iw,ih,0,0,cropCanvas.width,cropCanvas.height);
+    cropCtx.fillStyle='rgba(0,0,0,0.6)';
+    cropCtx.fillRect(0,0,cropCanvas.width,cropCanvas.height);
+
+    const r = getCropRect();
+    const rx=r.x*cropScale, ry=r.y*cropScale, rw=r.w*cropScale, rh=r.h*cropScale;
+    cropCtx.drawImage(img, r.x,r.y,r.w,r.h, rx,ry,rw,rh);
+    cropCtx.strokeStyle='#e8e6e1';
+    cropCtx.lineWidth=2;
+    cropCtx.strokeRect(rx+1,ry+1,rw-2,rh-2);
+    cropCtx.strokeStyle='rgba(232,230,225,0.5)';
+    cropCtx.lineWidth=1;
+    for(let i=1;i<3;i++){
+      cropCtx.beginPath(); cropCtx.moveTo(rx+rw*i/3, ry); cropCtx.lineTo(rx+rw*i/3, ry+rh); cropCtx.stroke();
+      cropCtx.beginPath(); cropCtx.moveTo(rx, ry+rh*i/3); cropCtx.lineTo(rx+rw, ry+rh*i/3); cropCtx.stroke();
+    }
+  }
+
+  function pointerPos(e){
+    const rect = cropCanvas.getBoundingClientRect();
+    const scaleX = cropCanvas.width/rect.width, scaleY = cropCanvas.height/rect.height;
+    return { x:(e.clientX-rect.left)*scaleX, y:(e.clientY-rect.top)*scaleY };
+  }
+
+  cropCanvas.addEventListener('pointerdown', e=>{
+    if(!img) return;
+    cropCanvas.setPointerCapture(e.pointerId);
+    cropCanvas.classList.add('grabbing');
+    const p = pointerPos(e);
+    const r = getCropRect();
+    dragging = true;
+    dragStartPX = p.x; dragStartPY = p.y;
+    dragStartRectX = r.x; dragStartRectY = r.y;
+  });
+  cropCanvas.addEventListener('pointermove', e=>{
+    if(!dragging || !img) return;
+    const p = pointerPos(e);
+    const dxCanvas = p.x - dragStartPX, dyCanvas = p.y - dragStartPY;
+    const dxImg = dxCanvas/cropScale, dyImg = dyCanvas/cropScale;
+    const r = getCropRect();
+    let newX = dragStartRectX + dxImg, newY = dragStartRectY + dyImg;
+    newX = Math.max(0, Math.min(r.maxX, newX));
+    newY = Math.max(0, Math.min(r.maxY, newY));
+    cropPosX = r.maxX>0 ? newX/r.maxX : 0.5;
+    cropPosY = r.maxY>0 ? newY/r.maxY : 0.5;
+    drawCropUI();
+    render();
+  });
+  function endDrag(){ dragging=false; cropCanvas.classList.remove('grabbing'); }
+  cropCanvas.addEventListener('pointerup', endDrag);
+  cropCanvas.addEventListener('pointercancel', endDrag);
+  cropCanvas.addEventListener('pointerleave', ()=>{ if(!dragging) return; });
+
+  cropZoomSlider.addEventListener('input', ()=>{
+    cropZoom = parseFloat(cropZoomSlider.value);
+    drawCropUI();
+    render();
+  });
+  cropResetBtn.addEventListener('click', ()=>{
+    cropZoom = 1; cropPosX=0.5; cropPosY=0.5;
+    cropZoomSlider.value = 1;
+    drawCropUI();
+    render();
+  });
+
   for(let v=16; v<=400; v+=2){
     const o1=document.createElement('option'); o1.value=v; o1.textContent=v;
     const o2=document.createElement('option'); o2.value=v; o2.textContent=v;
@@ -253,7 +380,14 @@
     const reader = new FileReader();
     reader.onload = e=>{
       const image = new Image();
-      image.onload = ()=>{ img = image; render(); };
+      image.onload = ()=>{
+        img = image;
+        cropZoom = 1; cropPosX = 0.5; cropPosY = 0.5;
+        cropZoomSlider.value = 1;
+        cropCard.style.display = fitMode.value==='cover' ? 'block' : 'none';
+        drawCropUI();
+        render();
+      };
       image.src = e.target.result;
     };
     reader.readAsDataURL(file);
@@ -261,11 +395,16 @@
 
   resSelect.addEventListener('change', ()=>{
     customRow.style.display = resSelect.value==='custom' ? 'flex' : 'none';
+    if(img) drawCropUI();
     render();
   });
-  customW.addEventListener('change', render);
-  customH.addEventListener('change', render);
-  fitMode.addEventListener('change', render);
+  customW.addEventListener('change', ()=>{ if(img) drawCropUI(); render(); });
+  customH.addEventListener('change', ()=>{ if(img) drawCropUI(); render(); });
+  fitMode.addEventListener('change', ()=>{
+    cropCard.style.display = fitMode.value==='cover' && img ? 'block' : 'none';
+    if(fitMode.value==='cover' && img) drawCropUI();
+    render();
+  });
 
   ditherSeg.addEventListener('click', e=>{
     const btn = e.target.closest('button'); if(!btn) return;
@@ -319,10 +458,13 @@
       ctx.drawImage(img, 0,0,iw,ih, 0,0,W,H);
       return;
     }
-    const scaleCover = Math.max(W/iw, H/ih);
+    if(mode==='cover'){
+      const r = getCropRect();
+      ctx.drawImage(img, r.x,r.y,r.w,r.h, 0,0,W,H);
+      return;
+    }
     const scaleContain = Math.min(W/iw, H/ih);
-    const scale = mode==='cover' ? scaleCover : scaleContain;
-    const dw = iw*scale, dh = ih*scale;
+    const dw = iw*scaleContain, dh = ih*scaleContain;
     const dx = (W-dw)/2, dy = (H-dh)/2;
     ctx.drawImage(img, 0,0,iw,ih, dx,dy,dw,dh);
   }
